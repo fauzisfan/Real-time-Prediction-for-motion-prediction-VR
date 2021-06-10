@@ -226,7 +226,7 @@ def GazeUpdate(proj_pred, proj_input, input_orientation=[0,0,0,0], prediction=[0
 	
 	width = overfill_left[2]-overfill_left[0]
 	height = overfill_left[1]-overfill_left[3]
-	scale = min(width,height)
+	scale = 1#min(width,height)
 	
 	pitch_diff = (prediction[0]-input_orientation[0])
 	yaw_diff = (prediction[2]-input_orientation[2])
@@ -281,19 +281,23 @@ def calCenterRect(proj_data, const = 0.1, predict = False):
 		size = (proj_data[2]-proj_data[0])*(proj_data[1]-proj_data[3])*const
 	return [size]
 
-def calProjection(hmd_orientation, frame_orientation, Radii):
+def calProjection(hmd_orientation, frame_orientation, Radii, center, focus = True):
         q_d = np.matmul(
                 np.linalg.inv(quaternion.as_rotation_matrix(hmd_orientation)),
                 quaternion.as_rotation_matrix(frame_orientation)
                 )
-            
-        width = np.matmul(np.linalg.inv(q_d), [Radii[0], 0, 1])
+		
+        if (focus):
+	        cen_min = np.matmul(q_d, [-0.18976885080337524, -0.12733805179595947, 1])
+	        center = np.dot(cen_min, 1 / cen_min[2])
+		
+        width = np.matmul(np.linalg.inv(q_d), [Radii[0]+center[0], center[1], 1])
         p_width = np.dot(np.dot(width, 1 / width[2]),1)
         
-        height = np.matmul(np.linalg.inv(q_d), [0, Radii[1], 1])
+        height = np.matmul(np.linalg.inv(q_d), [center[0], Radii[1]+center[1], 1])
         p_height = np.dot(np.dot(height, 1 / height[2]),1)
 		
-        center = np.matmul(np.linalg.inv(q_d), [0, 0, 1])
+        center = np.matmul(np.linalg.inv(q_d), [center[0], center[1], 1])
         p_center = np.dot(np.dot(center, 1 / center[2]),1)
 		
         thetaX = np.arctan((p_width[1]-p_center[1])/(p_width[0]-p_center[0]))
@@ -307,8 +311,8 @@ def calProjection(hmd_orientation, frame_orientation, Radii):
         return np.array([theta, width, height]), p_center
 
 def createPixel(proj_input, number_pixel = 1024):
-	difX = (proj_input[2]-proj_input[0])/number_pixel
-	difY = (proj_input[1]-proj_input[3])/number_pixel
+	difX = (proj_input[2]-proj_input[0])/(number_pixel-1)
+	difY = (proj_input[1]-proj_input[3])/(number_pixel-1)
 	
 	matrix2DX = np.array([proj_input[0]+i*difX for i in range(0,number_pixel)])
 	matrix2DY = np.array([proj_input[3]+i*difY for i in range(0,number_pixel)])
@@ -324,45 +328,66 @@ def calNumPixel(outer, inner, proj_data, m2DX, m2DY, const = 0.25, num_pixel = 1
 	centerX = inner[0]
 	centerY = inner[1]
 	
-	sin_angle = np.sin(angle)
 	cos_angle = np.cos(angle)
+	sin_angle = np.sin(angle)
 	
-	Rx = centerX + m2DX*cos_angle
-	Ry = centerY + m2DY*cos_angle
-	
+	center = [(proj_data[0]+proj_data[2])/2,(proj_data[3]+proj_data[1])/2]
 	side = np.sqrt((proj_data[2]-proj_data[0])*(proj_data[1]-proj_data[3])*const)
 	
 	ellips_pixel = 0
 	rect_pixel = 0
 	target = 0
+	f = 0
 	for i in range (num_pixel):
 		for j in range (num_pixel):
 			
-			ellips = (Rx[i]-centerX)**2/(width*cos_angle)**2+(Ry[j]-centerY)**2/(height*cos_angle)**2<=1
-			rect = m2DX[i]<=side/2 and m2DX[i]>=-side/2 and m2DY[j]<=side/2 and m2DY[j]>=-side/2
+			ellips = (m2DX[i]*cos_angle+m2DY[j]*sin_angle-centerX)**2/width**2+(m2DY[j]*cos_angle-m2DX[i]*sin_angle-centerY)**2/height**2<=1
+			rect = m2DX[i]<=side/2+center[0] and m2DX[i]>=-side/2+center[0] and m2DY[j]<=side/2+center[1] and m2DY[j]>=-side/2+center[1]
 			
 			if (ellips and rect):
 				target +=1
 				ellips_pixel +=1
 				rect_pixel +=1
+				f += contrastSensitivity(m2DX[i], m2DY[j], outer, inner, cPoint = center, v = 1, CT = 1)
 			elif (ellips):
 				ellips_pixel +=1
+				f += contrastSensitivity(m2DX[i], m2DY[j], outer, inner, cPoint = center, v = 1, CT = 1)
 			elif (rect):
 				rect_pixel +=1
 			
 	
-	return ellips_pixel/total*100, (ellips_pixel-target)/rect_pixel*100, target/rect_pixel*100
+	return ellips_pixel/total*100, (ellips_pixel-target)/rect_pixel*100, target/rect_pixel*100, f/ellips_pixel
 
-def contrastSensitivity(matrix2DX, matrix2DY, cPoint = [0,0], CT = 1, minCT = 1/64, e2 = 2.3, alpha = 0.106, n = 1024):
-	f = np.empty((n,n), dtype =float)
-	for i in range(n):
-		for j in range(n):
-			dist = np.sqrt((matrix2DX[i]-cPoint[0])**2+(matrix2DY[j]-cPoint[1])**2)
-			e = np.arctan(dist)*180/np.pi
-			f[i,j] = e2*np.log(CT/minCT)/(alpha*(e+e2))
+def contrastSensitivity(matrix2DX, matrix2DY, outer, inner, cPoint = [0,0], v = 1, CT = 1, minCT = 1/64, e2 = 2.3, alpha = 0.106, n = 1024):
+	
+	''' calculate all foveation region called by calNumPixel function'''
+	dist = np.sqrt((matrix2DX-cPoint[0])**2+(matrix2DY-cPoint[1])**2)/v
+	e = np.arctan(dist)*180/np.pi
+	f = e2*np.log(CT/minCT)/(alpha*(e+e2))
+
+	''' calculate separated all foveation region'''
+# 	cPoint = [(matrix2DX[n-1]+matrix2DX[0])/2,(matrix2DY[n-1]+matrix2DY[0])/2]
+# 	f = 0
+# 	count = 0
+# 	for i in range(len(matrix2DX)):
+# 		for j in range(len(matrix2DY)):
+# 			ellips = (m2DX[i]*cos_angle+m2DY[j]*sin_angle-centerX)**2/width**2+(m2DY[j]*cos_angle-m2DX[i]*sin_angle-centerY)**2/height**2<=1
+# 			if (ellips):
+# 				dist = np.sqrt((matrix2DX[i]-cPoint[0])**2+(matrix2DY[j]-cPoint[1])**2)/v
+# 				e = np.arctan(dist)*180/np.pi
+# 				f += e2*np.log(CT/minCT)/(alpha*(e+e2))
+# 				count +=1
+	
+	''' calculate only center of foveated region'''
+# 	f = np.empty(len(poin), dtype =float)
+# 	for i in range(len(poin)):
+# 		dist = np.sqrt((poin[i,0]-cPoint[0])**2+(poin[i,1]-cPoint[1])**2)/v
+# 		e = np.arctan(dist)*180/np.pi
+# 		f[i] = e2*np.log(CT/minCT)/(alpha*(e+e2))
+	
 	return f
 
-def plotGrapgh(outer, inner):
+def plotGraph(outer, inner, inp, axis, const):
 	angle = outer[0]
 	width = outer[1]
 	height = outer[2]
@@ -370,17 +395,37 @@ def plotGrapgh(outer, inner):
 	centerX = inner[0]
 	centerY = inner[1]
 	
-	x_ellipse = np.arange(-width*np.cos(angle)+centerX,width*np.cos(angle)+centerX,0.0001)
+	x_ellipse = np.arange(-width,width,0.0001)
 	x_ellipse_squared = np.square(x_ellipse)
-	y_ellipse_plus = (height/width)*np.sqrt(-x_ellipse_squared+width*width)*np.cos(angle)+centerY
-	y_ellipse_minus = -(height/width)*np.sqrt(-x_ellipse_squared+width*width)*np.cos(angle)+centerY
+	
+	y_ellipse_plus = (height/width)*np.sqrt(-x_ellipse_squared+width*width)
+	y_ellipse_minus = -(height/width)*np.sqrt(-x_ellipse_squared+width*width)
+	
+	inp = [(axis[0,0]+axis[0,2])/2,(axis[0,3]+axis[0,1])/2]
+	
+	side = np.sqrt((axis[0,2]-axis[0,0])*(axis[0,1]-axis[0,3])*const)
 	
 	plt.figure()
 	
-	plt.scatter(x_ellipse, y_ellipse_plus, color='red',marker='.', linewidth=0.1)
-	plt.scatter(x_ellipse, y_ellipse_minus, color='red',marker='.', linewidth=0.1)
-	plt.show()
+	'''Plot Center Point'''
+	plt.scatter(inp[0],inp[1],marker="x")
+	plt.legend(['Point Score: {:.2f}'.format((inp[0]*np.cos(angle)+inp[1]*np.sin(angle)-centerX)**2/width**2+
+										(inp[1]*np.cos(angle)-inp[0]*np.sin(angle)-centerY)**2/height**2)])
 	
+	'''plot Center Rectangular'''
+	plt.plot(np.full(100,-side/2+inp[0]), np.linspace(inp[1]-side/2,inp[1]+side/2,100),color='blue')
+	plt.plot(np.full(100,side/2+inp[0]), np.linspace(inp[1]-side/2,inp[1]+side/2,100), color='blue')
+	plt.plot(np.linspace(inp[0]-side/2,inp[0]+side/2,100),np.full(100,-side/2+inp[1]), color='blue')
+	plt.plot(np.linspace(inp[0]-side/2,inp[0]+side/2,100),np.full(100,side/2+inp[1]), color='blue')
+	
+	'''plot Ellipse Region'''
+	plt.scatter(centerX + x_ellipse*np.cos(angle)+y_ellipse_plus*np.sin(angle), centerY - x_ellipse*np.sin(angle)+y_ellipse_plus*np.cos(angle), color='red',marker='.', linewidth=0.1)
+	plt.scatter(centerX + x_ellipse*np.cos(angle)+y_ellipse_minus*np.sin(angle), centerY - x_ellipse*np.sin(angle)+y_ellipse_minus*np.cos(angle), color='red',marker='.', linewidth=0.1)
+	
+	plt.xlim([axis[0,0],axis[0,2]])
+	plt.ylim([axis[0,3],axis[0,1]])
+	plt.show()
+
 	
 anticipation_time = 300
 '''
@@ -392,7 +437,7 @@ tf.set_random_seed(2)
 
 np.random.seed(2)
 
-scheme = 'model' #(optimal|model|fix|ellips|step)
+scheme = 'fix' #(optimal|model|fix|ellips|step)
 
 #parser = argparse.ArgumentParser(description='Offline Motion Prediction')
 #parser.add_argument('-a', '--anticipation', default=300, type=int)
@@ -872,7 +917,7 @@ cap_pred_rt = np.zeros((0,3), dtype= float)
 crp_pred_rt = np.zeros((0,3), dtype= float)
 nop_pred_rt = np.zeros((0,3), dtype= float)
 overfilling_rt = np.zeros((0,4), dtype= float)
-gaze_pos = np.zeros((0,4), dtype= float)
+gaze_pos = np.zeros((0,2), dtype= float)
 radiiPattern = np.zeros((0,6), dtype= float)
 error_rt = np.zeros((0,3))
 inner = np.zeros((0,3), dtype = float)
@@ -1115,7 +1160,7 @@ with tf.Session() as new_sess:
 
 			elif scheme == 'model':
 				'''Model-Based Overfilling'''
-				margin = Robust_overfilling(euler_pred_onedata[0]*np.pi/180, y_sample[0]*np.pi/180, proj_data[i], offset = 1.1, fixed_param = 1.3)
+				margin = Robust_overfilling(euler_pred_onedata[0]*np.pi/180, y_sample[0]*np.pi/180, proj_data[i], offset = 0.75, fixed_param = 1.6)#former = 1.1, 1,3
             
 			elif scheme == 'fix':
 				'''Fixed Overfilling'''
@@ -1123,22 +1168,22 @@ with tf.Session() as new_sess:
 				margin_fix = np.sqrt(2*optimum_overfill_size)/2
 				margin = np.array([-(margin_fix+np.sin(diff[0,2])),margin_fix+np.sin(diff[0,0]),margin_fix-np.sin(diff[0,2]),-(margin_fix-np.sin(diff[0,0]))])
 			
-# 			left, right = GazeUpdate(margin, proj_data[i],euler_pred_onedata[0]*np.pi/180, y_sample[0]*np.pi/180)
-# 			left, right = GazeUpdate(margin, proj_data[i])
+			overfilling_rt = np.concatenate((overfilling_rt, np.reshape(margin, (1, -1))), axis = 0)
+
+# 			right, left = GazeUpdate(margin, proj_data[i],euler_pred_onedata[0]*np.pi/180, y_sample[0]*np.pi/180)
+			_, left = GazeUpdate(margin, proj_data[i])
 			
 # 			size = calCenterRect(proj_data[i], predict = False)
 			
 # 			center_size = np.concatenate((center_size, size), axis = 0)
 			
-			overfilling_rt = np.concatenate((overfilling_rt, np.reshape(margin, (1, -1))), axis = 0)
-			
-# 			gaze_pos = np.concatenate((gaze_pos, np.reshape(left+right, (1,-1))),axis=0)
+			gaze_pos = np.concatenate((gaze_pos, np.reshape(left, (1,-1))),axis=0)
 			
 			currPatternX, currPatternY = FoveationPatternUpdate(margin, proj_data[i])
 			radiiPattern = np.concatenate((radiiPattern, np.reshape(currPatternX+currPatternY, (1,-1))),axis=0)
 			
 			'''For Projection'''
-			euler_prev_onedata = solve_discontinuity(train_eule_data[i-DELAY_SIZE].reshape(1,-1))
+			euler_prev_onedata = solve_discontinuity(train_eule_data[i-2].reshape(1,-1))
 			quat_quat_prev = eul2quat_bio(euler_prev_onedata)
 			quat_quat_now = eul2quat_bio(euler_pred_onedata)
          
@@ -1158,7 +1203,7 @@ with tf.Session() as new_sess:
                 frame_orientation[:,3]
                 )
 				
-			temp1, temp2 = calProjection(motion_, photon_, [currPatternX[0],currPatternY[0]])
+			temp1, temp2 = calProjection(motion_, photon_, [currPatternX[0],currPatternY[0]], center = left, focus = False)
 			
 			outer = np.concatenate((outer, np.reshape(temp1, (1,-1))),axis=0)
 			inner = np.concatenate((inner, np.reshape(temp2, (1,-1))),axis=0)
@@ -1321,7 +1366,7 @@ for i in range (anticipation_size):
 	overfilling_rt = np.concatenate((overfilling_rt, np.reshape(proj_data[0], (1, -1))), axis = 0)
 # 	ido_values = np.vstack((ido_values,proj_data[0]))
 # 	ellips_values = np.vstack((ellips_values,proj_data[0]))
-	gaze_pos = np.vstack((gaze_pos,[0,0,0,0]))
+	gaze_pos = np.vstack((gaze_pos,[(proj_data[i,0]+proj_data[i,2])/2,(proj_data[i,3]+proj_data[i,1])/2]))
 # 	radiiPattern = np.vstack((radiiPattern,[0.25,0.35,10]))
 
 """Calculate online error"""
@@ -1602,19 +1647,24 @@ print('NOP [Pitch, Roll, Yaw]: {:.2f},{:.2f},{:.2f}'.format(final_nop_rt_99[0], 
 
 m2DX, m2DY = createPixel(proj_data[0])
 
+'''Foveation Metrices on HighRes'''
 center_size = np.zeros(0, dtype= float)
 oversized = np.zeros(0, dtype= float)
 highRes = np.zeros(0, dtype= float)
+freq = np.zeros(0, dtype= float)
 
 length = 1000
 
 for i in range (length):
-	print('Calculation Number: {:d}'.format(i))
-	size1, size2, size3 = calNumPixel(outer[i], inner[i], proj_data[0], m2DX, m2DY, const = 0.1)
+	if (i%200 == 0):
+		print('Calculation Number: {:d}'.format(i))
+	size1, size2, size3, res = calNumPixel(outer[i], inner[i], proj_data[0], m2DX, m2DY, const = 0.1)
 	
 	highRes = np.concatenate((highRes, [size1]), axis = 0)
 	oversized = np.concatenate((oversized, [size2]), axis = 0)
 	center_size = np.concatenate((center_size, [size3]), axis = 0)
+	
+	freq = np.concatenate((freq,[res]), axis = 0)
 
 
 plt.figure()
@@ -1633,7 +1683,7 @@ plt.figure()
 x = np.sort(center_size)
 y = np.arange(1, len(x)+1)/len(x)
 plt.plot(x, y, marker='.', linestyle='none')
-plt.xlabel('Number Pixel of User Screen covered by High Resolution (Pixel)')
+plt.xlabel('Percentage of User Screen covered by High Resolution (%)')
 plt.ylabel('likehood of Occurance')
 plt.title('CDF of Center-Rect covered by High Resolution')
 plt.margins(0.02)
@@ -1646,7 +1696,7 @@ plt.figure()
 x = np.sort(oversized)
 y = np.arange(1, len(x)+1)/len(x)
 plt.plot(x, y, marker='.', linestyle='none')
-plt.xlabel('Number Pixel of High Resolution oversized Center Size (Pixel)')
+plt.xlabel('Percentage of High Resolution oversized Center Size (%)')
 plt.ylabel('likehood of Occurance')
 plt.title('CDF of High Resolution oversized Center-Rect')
 plt.margins(0.02)
@@ -1655,12 +1705,33 @@ plt.show()
 
 print('Percentage of oversized HighRes on Center-Rect Size: {:.2f}%'.format(np.nanmean(oversized)))
 
-f = contrastSensitivity(m2DX, m2DY, cPoint = inner[0,:2])
+'''Foveation Matrices on Contrast Sensitivity'''
+# length = 1000
+# result = np.zeros(0, dtype= float)
+# for i in range (length):
+# 	if (i%200 == 0):
+# 		print('Calculation Number: {:d}'.format(i))
+# 	result = np.concatenate((result,[contrastSensitivity(m2DX, m2DY, outer[i], inner[i], v = 1, CT = 1)]), axis = 0)
+
+# plt.figure()
+# # plt.plot(m2DX, f[:,np.where(m2DY == min(abs(m2DY)))[0]], marker='.', linestyle='none') #np.linspace(-512,512,1024)
+# plt.plot(m2DX, f[:,512], marker='.', linestyle='none') #np.linspace(-512,512,1024)
+# # plt.plot(np.fill(100,-side/2), np.linspace(0,35,100))
+# plt.xlabel('Image Scale (unit)')
+# plt.ylabel('Spatial Frequency (cycles/degree)')
+# plt.title('Contrast Sensitivity')
+# plt.margins(0.02)
+
 plt.figure()
-plt.plot(np.linspace(-512,512,1024), f, marker='.', linestyle='none')
-plt.xlabel('Pixel Position (pixels)')
-plt.ylabel('Spatial Frequency (cycles/degree)')
-plt.title('Contrast Sensitivity')
+x = np.sort(freq)
+y = np.arange(1, len(x)+1)/len(x)
+plt.plot(x, y, marker='.', linestyle='none')
+plt.xlabel('Spatial Frequency (cycle/degree)')
+plt.ylabel('likehood of Occurance')
+plt.title('CDF of Spatial Frequency Score(cycles/degree) of ' + scheme)
+plt.legend(['99%-tile Frequency: {:.2f} cycles/degree'.format(np.nanpercentile(freq,1))])
 plt.margins(0.02)
 
 plt.show()
+
+print('\nAverage Frequency of '+scheme+': {:.2f} cycles/degree'.format(np.nanmean(freq)))
