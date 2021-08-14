@@ -154,7 +154,7 @@ def Robust_overfilling(input_orientation, prediction, input_projection, offset =
     	
     	#Get initial input angle to the rotational center
     input_anglex = np.arctan(IPDx/(2*h))
-    input_angley = np.arctan(IPDx/(2*h))
+    input_angley = np.arctan(IPDy/(2*h))
     	
     	#Get user's direction based on prediction motion
     pitch_diff = (prediction[0]-input_orientation[0])
